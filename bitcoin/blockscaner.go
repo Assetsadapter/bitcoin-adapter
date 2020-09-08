@@ -598,10 +598,10 @@ func (bs *BTCBlockScanner) ExtractTransaction(blockHeight uint64, blockHash stri
 		result.IsOmniTransfer = true
 	}
 
-	bs.extractTransaction(trx, &result, scanAddressFunc)
-
 	if omniTrx != nil {
 		bs.extractOmniTransaction(omniTrx, &result, scanAddressFunc)
+	}else{
+		bs.extractTransaction(trx, &result, scanAddressFunc)
 	}
 
 	////bs.wm.Log.Debug("start extractTransaction")

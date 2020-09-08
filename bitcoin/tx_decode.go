@@ -445,10 +445,12 @@ func (decoder *TransactionDecoder) VerifyBTCRawTransaction(wrapper openwallet.Wa
 		if err != nil {
 			return err
 		}
-
+		txAmount := common.StringNumToBigIntWithExp(utxo.Value, decoder.wm.Decimal())
 		txUnlock := btcTransaction.TxUnlock{
 			LockScript: utxo.ScriptPubKey,
-			SigType:    btcTransaction.SigHashAll}
+			SigType:    btcTransaction.SigHashAll,
+			Amount:     txAmount.Uint64(),
+		}
 		txUnlocks = append(txUnlocks, txUnlock)
 
 	}
@@ -1070,10 +1072,10 @@ func (decoder *TransactionDecoder) CreateBTCSummaryRawTransaction(wrapper openwa
 			//执行构建交易单工作
 			//decoder.wm.Log.Debugf("sumUnspents: %+v", sumUnspents)
 			//计算手续费，构建交易单inputs，地址保留余额>0，地址需要加入输出，最后+1是汇总地址
-			fees, createErr := decoder.wm.EstimateFee(int64(len(sumUnspents)), int64(len(outputAddrs)+1), feesRate)
-			if createErr != nil {
-				return nil, createErr
-			}
+			fees, _ := decoder.wm.EstimateFee(int64(len(sumUnspents)), int64(len(outputAddrs)+1), feesRate)
+			//if createErr != nil {
+			//	return nil, createErr
+			//}
 
 			//计算这笔交易单的汇总数量
 			for _, u := range sumUnspents {
@@ -1121,7 +1123,7 @@ func (decoder *TransactionDecoder) CreateBTCSummaryRawTransaction(wrapper openwa
 					Required: 1,
 				}
 
-				createErr = decoder.createBTCRawTransaction(wrapper, rawTx, sumUnspents, outputAddrs)
+				createErr := decoder.createBTCRawTransaction(wrapper, rawTx, sumUnspents, outputAddrs)
 				rawTxWithErr := &openwallet.RawTransactionWithError{
 					RawTx: rawTx,
 					Error: openwallet.ConvertError(createErr),
@@ -1196,8 +1198,8 @@ func (decoder *TransactionDecoder) createBTCRawTransaction(
 	for _, utxo := range usedUTXO {
 		in := btcTransaction.Vin{utxo.TxID, uint32(utxo.Vout)}
 		vins = append(vins, in)
-
-		txUnlock := btcTransaction.TxUnlock{LockScript: utxo.ScriptPubKey, SigType: btcTransaction.SigHashAll}
+		txAmount := common.StringNumToBigIntWithExp(utxo.Amount, decoder.wm.Decimal())
+		txUnlock := btcTransaction.TxUnlock{LockScript: utxo.ScriptPubKey, SigType: btcTransaction.SigHashAll, Amount: txAmount.Uint64()}
 		txUnlocks = append(txUnlocks, txUnlock)
 
 		txFrom = append(txFrom, fmt.Sprintf("%s:%s", utxo.Address, utxo.Amount))
@@ -1381,7 +1383,7 @@ func (decoder *TransactionDecoder) createOmniRawTransaction(
 
 		if to == omniReceiver {
 			//最后一个输出为目标地址
-			vouts[len(coinTo) - 1] = out
+			vouts[len(coinTo)-1] = out
 		} else {
 			vouts[voutIndex] = out
 			voutIndex++
@@ -1610,10 +1612,10 @@ func (decoder *TransactionDecoder) CreateOmniSummaryRawTransaction(wrapper openw
 		}
 		//decoder.wm.Log.Debug("addrBalance:", addrBalance)
 		//计算手续费，构建交易单inputs + 1（可选手续费地址），输出2个，1个为目标地址，1个为找零
-		fees, createErr := decoder.wm.EstimateFee(int64(len(unspents))+1, 2, feesRate)
-		if createErr != nil {
-			return nil, createErr
-		}
+		fees, _ := decoder.wm.EstimateFee(int64(len(unspents))+1, 2, feesRate)
+		//if createErr != nil {
+		//	return nil, createErr
+		//}
 
 		totalCost := transferCost.Add(fees)
 

@@ -1,4 +1,4 @@
-module github.com/blocktree/bitcoin-adapter
+module github.com/Assetsadapter/bitcoin-adapter
 
 go 1.12
 

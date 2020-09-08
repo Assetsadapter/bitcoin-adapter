@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"github.com/blocktree/go-owcdrivers/btcTransaction"
 	"github.com/blocktree/go-owcdrivers/omniTransaction"
+	"github.com/blocktree/go-owcdrivers/owkeychain"
 	"github.com/blocktree/openwallet/common"
 	"github.com/blocktree/openwallet/openwallet"
 	"github.com/shopspring/decimal"
@@ -374,6 +375,73 @@ func (decoder *TransactionDecoder) SignBTCRawTransaction(wrapper openwallet.Wall
 
 	return nil
 }
+type btcMultiTxSort struct {
+Values     []btcTransaction.MultiTx
+Comparator func(a, b btcTransaction.MultiTx) int
+}
+
+func ( m btcMultiTxSort) Len() int {
+	return len(m.Values)
+}
+
+func (m btcMultiTxSort) Less(i, j int) bool {
+	return m.Comparator(m.Values[i], m.Values[j]) < 0
+}
+
+func (m btcMultiTxSort) Swap(i, j int) {
+	m.Values[i], m.Values[j] = m.Values[j], m.Values[i]
+}
+
+type btcTranHashTxSort struct {
+	Values     []btcTransaction.TxHash
+	Comparator func(a, b btcTransaction.TxHash) int
+}
+
+func (t btcTranHashTxSort) Len() int {
+	return len(t.Values)
+}
+
+func (t btcTranHashTxSort) Less(i, j int) bool {
+	return t.Comparator(t.Values[i], t.Values[j]) < 0
+}
+
+func (t btcTranHashTxSort) Swap(i, j int) {
+	t.Values[i], t.Values[j] = t.Values[j], t.Values[i]
+}
+
+type omniMultiTxSort struct {
+	Values     []omniTransaction.MultiTx
+	Comparator func(a, b omniTransaction.MultiTx) int
+}
+
+func ( m omniMultiTxSort) Len() int {
+	return len(m.Values)
+}
+
+func (m omniMultiTxSort) Less(i, j int) bool {
+	return m.Comparator(m.Values[i], m.Values[j]) < 0
+}
+
+func (m omniMultiTxSort) Swap(i, j int) {
+	m.Values[i], m.Values[j] = m.Values[j], m.Values[i]
+}
+
+type omniTranHashTxSort struct {
+	Values     []omniTransaction.TxHash
+	Comparator func(a,b omniTransaction.TxHash) int
+}
+
+func (t omniTranHashTxSort) Len() int {
+	return len(t.Values)
+}
+
+func (t omniTranHashTxSort) Less(i, j int) bool {
+	return t.Comparator(t.Values[i], t.Values[j]) < 0
+}
+
+func (t omniTranHashTxSort) Swap(i, j int) {
+	t.Values[i], t.Values[j] = t.Values[j], t.Values[i]
+}
 
 //VerifyRawTransaction 验证交易单，验证交易单并返回加入签名后的交易单
 func (decoder *TransactionDecoder) VerifyBTCRawTransaction(wrapper openwallet.WalletDAI, rawTx *openwallet.RawTransaction) error {
@@ -397,37 +465,106 @@ func (decoder *TransactionDecoder) VerifyBTCRawTransaction(wrapper openwallet.Wa
 		return fmt.Errorf("transaction signature is empty")
 	}
 
-	//TODO:待支持多重签名
+	//判断是否多签账户
+	var  isMultiSign = false
+	if len(rawTx.Account.OwnerKeys)>1{
+		isMultiSign = true
+	}
 
-	for accountID, keySignatures := range rawTx.Signatures {
-		decoder.wm.Log.Debug("accountID Signatures:", accountID)
-		for _, keySignature := range keySignatures {
+	//普通签名
+	if !isMultiSign {
 
-			signature, _ := hex.DecodeString(keySignature.Signature)
-			pubkey, _ := hex.DecodeString(keySignature.Address.PublicKey)
+		for accountID, keySignatures := range rawTx.Signatures {
+			decoder.wm.Log.Debug("accountID Signatures:", accountID)
+			for _, keySignature := range keySignatures {
 
-			signaturePubkey := btcTransaction.SignaturePubkey{
-				Signature: signature,
-				Pubkey:    pubkey,
+				signature, _ := hex.DecodeString(keySignature.Signature)
+				pubkey, _ := hex.DecodeString(keySignature.Address.PublicKey)
+
+				signaturePubkey := btcTransaction.SignaturePubkey{
+					Signature: signature,
+					Pubkey:    pubkey,
+				}
+
+				//sigPub = append(sigPub, signaturePubkey)
+
+				txHash := btcTransaction.TxHash{
+					Hash: keySignature.Message,
+					Normal: &btcTransaction.NormalTx{
+						Address: keySignature.Address.Address,
+						SigType: btcTransaction.SigHashAll,
+						SigPub:  signaturePubkey,
+					},
+				}
+
+				transHash = append(transHash, txHash)
+
+				decoder.wm.Log.Debug("Signature:", keySignature.Signature)
+				decoder.wm.Log.Debug("PublicKey:", keySignature.Address.PublicKey)
+			}
+		}
+	}else {//多重签名
+
+		keyGroupMap := make(map[string][]*openwallet.KeySignature)
+		//多签名
+		for accountId, keySignatures := range rawTx.Signatures {
+			//观察钱包本身不参与签名
+			if rawTx.Account.AccountID == accountId {
+				continue
+			}
+		  for _, keySignature := range keySignatures {
+
+		  		//未签名的跳过
+		  		if keySignature.Signature == ""{
+		  			continue
+				}
+				var valueGroup, _ = keyGroupMap[keySignature.Message]
+				valueGroup = append(valueGroup, keySignature)
+				keyGroupMap[keySignature.Message] = valueGroup
+		  }
+		}
+
+		//组装multiTx
+		for hash, keyGroup := range keyGroupMap {
+			var multiTx [] btcTransaction.MultiTx
+
+			//TODO multiTx 按顺序
+			for _, keySignInfo := range keyGroup {
+				publicKeyByte,_:=hex.DecodeString(keySignInfo.Address.PublicKey)
+				signatureByte,_:= hex.DecodeString(keySignInfo.Signature)
+				multiTx = append(multiTx, btcTransaction.MultiTx{
+					Pubkey:  keySignInfo.Address.PublicKey,
+					SigType: btcTransaction.SigHashAll,
+					SigPub:  btcTransaction.SignaturePubkey{Signature: signatureByte, Pubkey: publicKeyByte}})
 			}
 
-			//sigPub = append(sigPub, signaturePubkey)
+			arrayIndex := keyGroup[0].Address.Index
+			//排序
+			_,pubkeySortMap, err := decoder.MakeRedeemScript(rawTx.Account.OwnerKeys[1:],rawTx.Account.Required,arrayIndex)
+			if err != nil{
+				return err
+			}
+
+			sort.Sort(btcMultiTxSort{multiTx, func(a, b btcTransaction.MultiTx) int {
+				a_addr := hex.EncodeToString(a.SigPub.Pubkey)
+				b_addr := hex.EncodeToString(b.SigPub.Pubkey)
+				if pubkeySortMap[a_addr] > pubkeySortMap[b_addr] {
+					return 1
+				} else {
+					return -1
+				}
+			}})
 
 			txHash := btcTransaction.TxHash{
-				Hash: keySignature.Message,
-				Normal: &btcTransaction.NormalTx{
-					Address: keySignature.Address.Address,
-					SigType: btcTransaction.SigHashAll,
-					SigPub:  signaturePubkey,
-				},
+				Hash: hash,
+				NRequired: byte(len(keyGroup)),
+				Multi:     multiTx,
 			}
-
 			transHash = append(transHash, txHash)
-
-			decoder.wm.Log.Debug("Signature:", keySignature.Signature)
-			decoder.wm.Log.Debug("PublicKey:", keySignature.Address.PublicKey)
 		}
+
 	}
+
 
 	txBytes, err := hex.DecodeString(emptyTrans)
 	if err != nil {
@@ -439,25 +576,73 @@ func (decoder *TransactionDecoder) VerifyBTCRawTransaction(wrapper openwallet.Wa
 		return errors.New("Invalid transaction data! ")
 	}
 
+
 	for _, vin := range trx.Vins {
 
 		utxo, err := decoder.wm.GetTxOut(vin.GetTxID(), uint64(vin.GetVout()))
+		//txId逆序
+		vin.GetTxID()
+
 		if err != nil {
 			return err
 		}
+		var txUnlock btcTransaction.TxUnlock
 
-		txUnlock := btcTransaction.TxUnlock{
-			LockScript: utxo.ScriptPubKey,
-			SigType:    btcTransaction.SigHashAll}
-		txUnlocks = append(txUnlocks, txUnlock)
+		//amount, _ := strconv.ParseUint(utxo.Value, 10, 64)
+		//a,_:=decimal.New(utxo.Value)
+		amountBig :=common.StringNumToBigIntWithExp(utxo.Value,8)
+		//多重签名
+		if isMultiSign {
+			addresses, _:= wrapper.GetAddressList(0, -1, "AccountID",rawTx.Account.AccountID, "Address", utxo.Addr)
+			if len(addresses)!=1{
+				return errors.New("make TxUnlock error")
+			}
+			redeemScript,_, err := decoder.MakeRedeemScript(rawTx.Account.OwnerKeys[1:],rawTx.Account.Required,addresses[0].Index)
+			if err != nil{
+				return  nil
+			}
+
+			txUnlock = btcTransaction.TxUnlock{
+				LockScript: utxo.ScriptPubKey,
+				SigType:    btcTransaction.SigHashAll,
+				RedeemScript:redeemScript,
+				Amount: amountBig.Uint64(),
+			}
+			txUnlocks = append(txUnlocks, txUnlock)
+		} else{//普通签名
+			txUnlock = btcTransaction.TxUnlock{
+				LockScript: utxo.ScriptPubKey,
+				SigType:    btcTransaction.SigHashAll,
+				Amount: amountBig.Uint64(),
+			}
+			txUnlocks = append(txUnlocks, txUnlock)
+		}
 
 	}
+	if decoder.wm.Config.IsTestNet {
+		addressPrefix = decoder.wm.Config.TestNetAddressPrefix
+	} else {
+		addressPrefix = decoder.wm.Config.MainNetAddressPrefix
+	}
+	sortTransHash,err:=trx.GetSortHashesForSig(txUnlocks,decoder.wm.Config.SupportSegWit,addressPrefix)
+	if err !=nil {
+		return fmt.Errorf("")
+	}
 
-	//decoder.wm.Log.Debug(emptyTrans)
+	//排序transHash
+	sort.Sort( btcTranHashTxSort{transHash, func(a, b btcTransaction.TxHash) int {
+		if sortTransHash[a.Hash] > sortTransHash[b.Hash] {
+			return 1
+		} else {
+			return -1
+		}
+	}})
 
 	////////填充签名结果到空交易单
 	//  传入TxUnlock结构体的原因是： 解锁向脚本支付的UTXO时需要对应地址的赎回脚本， 当前案例的对应字段置为 "" 即可
 	signedTrans, err := btcTransaction.InsertSignatureIntoEmptyTransaction(emptyTrans, transHash, txUnlocks, decoder.wm.Config.SupportSegWit)
+	//log.Info("rawTx hash: ",hex.EncodeToString(signedTrans))
+
 	if err != nil {
 		return fmt.Errorf("transaction compose signatures failed")
 	}
@@ -466,11 +651,6 @@ func (decoder *TransactionDecoder) VerifyBTCRawTransaction(wrapper openwallet.Wa
 	//	//	fmt.Println(signedTrans)
 	//	//}
 
-	if decoder.wm.Config.IsTestNet {
-		addressPrefix = decoder.wm.Config.TestNetAddressPrefix
-	} else {
-		addressPrefix = decoder.wm.Config.MainNetAddressPrefix
-	}
 
 	/////////验证交易单
 	//验证时，对于公钥哈希地址，需要将对应的锁定脚本传入TxUnlock结构体
@@ -877,35 +1057,104 @@ func (decoder *TransactionDecoder) VerifyOmniRawTransaction(wrapper openwallet.W
 		return fmt.Errorf("transaction signature is empty")
 	}
 
-	for accountID, keySignatures := range rawTx.Signatures {
-		decoder.wm.Log.Debug("accountID Signatures:", accountID)
-		for _, keySignature := range keySignatures {
+	//判断是否多签账户
+	var  isMultiSign = false
+	if len(rawTx.Account.OwnerKeys)>1{
+		isMultiSign = true
+	}
+	//普通签名
+	if !isMultiSign {
+		for accountID, keySignatures := range rawTx.Signatures {
+			decoder.wm.Log.Debug("accountID Signatures:", accountID)
+			for _, keySignature := range keySignatures {
 
-			signature, _ := hex.DecodeString(keySignature.Signature)
-			pubkey, _ := hex.DecodeString(keySignature.Address.PublicKey)
+				signature, _ := hex.DecodeString(keySignature.Signature)
+				pubkey, _ := hex.DecodeString(keySignature.Address.PublicKey)
 
-			signaturePubkey := omniTransaction.SignaturePubkey{
-				Signature: signature,
-				Pubkey:    pubkey,
+				signaturePubkey := omniTransaction.SignaturePubkey{
+					Signature: signature,
+					Pubkey:    pubkey,
+				}
+
+				//sigPub = append(sigPub, signaturePubkey)
+
+				txHash := omniTransaction.TxHash{
+					Hash: keySignature.Message,
+					Normal: &omniTransaction.NormalTx{
+						Address: keySignature.Address.Address,
+						SigType: btcTransaction.SigHashAll,
+						SigPub:  signaturePubkey,
+					},
+				}
+
+				transHash = append(transHash, txHash)
+
+				decoder.wm.Log.Debug("Signature:", keySignature.Signature)
+				decoder.wm.Log.Debug("PublicKey:", keySignature.Address.PublicKey)
+			}
+		}
+	}else {//多重签名
+		//多重签名
+
+		keyGroupMap := make(map[string][]*openwallet.KeySignature)
+		//多签名
+		for accountId, keySignatures := range rawTx.Signatures {
+			//观察钱包本身不参与签名
+			if rawTx.Account.AccountID == accountId {
+				continue
+			}
+			for _, keySignature := range keySignatures {
+
+				//未签名的跳过
+				if keySignature.Signature == ""{
+
+				}
+				var valueGroup, _ = keyGroupMap[keySignature.Message]
+				valueGroup = append(valueGroup, keySignature)
+				keyGroupMap[keySignature.Message] = valueGroup
+			}
+		}
+
+		//组装multiTx
+		for hash, keyGroup := range keyGroupMap {
+			var multiTx [] omniTransaction.MultiTx
+
+			//TODO multiTx 按顺序
+			for _, keySignInfo := range keyGroup {
+				publicKeyByte,_:=hex.DecodeString(keySignInfo.Address.PublicKey)
+				signatureByte,_:= hex.DecodeString(keySignInfo.Signature)
+				multiTx = append(multiTx, omniTransaction.MultiTx{
+					Pubkey:  keySignInfo.Address.PublicKey,
+					SigType: btcTransaction.SigHashAll,
+					SigPub:  omniTransaction.SignaturePubkey{Signature: signatureByte, Pubkey: publicKeyByte}})
 			}
 
-			//sigPub = append(sigPub, signaturePubkey)
+			arrayIndex := keyGroup[0].Address.Index
+			//排序
+			_,pubkeySortMap, err := decoder.MakeRedeemScript(rawTx.Account.OwnerKeys[1:],rawTx.Account.Required,arrayIndex)
+			if err != nil{
+				return err
+			}
+
+			sort.Sort(omniMultiTxSort{multiTx, func(a, b omniTransaction.MultiTx) int {
+				a_addr := hex.EncodeToString(a.SigPub.Pubkey)
+				b_addr := hex.EncodeToString(b.SigPub.Pubkey)
+				if pubkeySortMap[a_addr] > pubkeySortMap[b_addr] {
+					return 1
+				} else {
+					return -1
+				}
+			}})
 
 			txHash := omniTransaction.TxHash{
-				Hash: keySignature.Message,
-				Normal: &omniTransaction.NormalTx{
-					Address: keySignature.Address.Address,
-					SigType: btcTransaction.SigHashAll,
-					SigPub:  signaturePubkey,
-				},
+				Hash: hash,
+				NRequired: byte(len(keyGroup)),
+				Multi:     multiTx,
 			}
-
 			transHash = append(transHash, txHash)
-
-			decoder.wm.Log.Debug("Signature:", keySignature.Signature)
-			decoder.wm.Log.Debug("PublicKey:", keySignature.Address.PublicKey)
 		}
 	}
+
 
 	txBytes, err := hex.DecodeString(emptyTrans)
 	if err != nil {
@@ -920,16 +1169,39 @@ func (decoder *TransactionDecoder) VerifyOmniRawTransaction(wrapper openwallet.W
 	for i, vin := range trx.Vins {
 
 		utxo, err := decoder.wm.GetTxOut(vin.GetTxID(), uint64(vin.GetVout()))
+		vin.GetTxID()
 		if err != nil {
 			return err
 		}
+		var txUnlock omniTransaction.TxUnlock
+		amountBig :=common.StringNumToBigIntWithExp(utxo.Value,8)
 
-		txUnlock := omniTransaction.TxUnlock{
-			LockScript: utxo.ScriptPubKey,
-			SigType:    btcTransaction.SigHashAll}
-		txUnlocks = append(txUnlocks, txUnlock)
+		if isMultiSign{
+			addresses, _:= wrapper.GetAddressList(0, -1, "AccountID",rawTx.Account.AccountID, "Address", utxo.Addr)
+			if len(addresses)!=1{
+				return errors.New("make TxUnlock error")
+			}
+			redeemScript,_, err := decoder.MakeRedeemScript(rawTx.Account.OwnerKeys[1:],rawTx.Account.Required,addresses[0].Index)
+			if err != nil{
+				return  nil
+			}
 
-		transHash = resetTransHashFunc(transHash, utxo.Addr, i)
+			txUnlock = omniTransaction.TxUnlock{
+				LockScript: utxo.ScriptPubKey,
+				SigType:    btcTransaction.SigHashAll,
+				RedeemScript:redeemScript,
+				Amount: amountBig.Uint64(),
+			}
+			txUnlocks = append(txUnlocks, txUnlock)
+		}else {
+			txUnlock = omniTransaction.TxUnlock{
+				LockScript: utxo.ScriptPubKey,
+				SigType:    btcTransaction.SigHashAll,
+				Amount:amountBig.Uint64(),
+				}
+			txUnlocks = append(txUnlocks, txUnlock)
+			transHash = resetTransHashFunc(transHash, utxo.Addr, i)
+		}
 	}
 
 	//decoder.wm.Log.Debug(emptyTrans)
@@ -948,6 +1220,19 @@ func (decoder *TransactionDecoder) VerifyOmniRawTransaction(wrapper openwallet.W
 		}
 	}
 
+	sortTransHash,err:=trx.GetSortHashesForSig(txUnlocks,decoder.wm.Config.SupportSegWit,addressPrefix)
+	if err !=nil {
+		return fmt.Errorf("")
+	}
+
+	//排序transHash
+	sort.Sort( omniTranHashTxSort{transHash, func(a, b omniTransaction.TxHash) int {
+		if sortTransHash[a.Hash] > sortTransHash[b.Hash] {
+			return 1
+		} else {
+			return -1
+		}
+	}})
 	////////填充签名结果到空交易单
 	//  传入TxUnlock结构体的原因是： 解锁向脚本支付的UTXO时需要对应地址的赎回脚本， 当前案例的对应字段置为 "" 即可
 	signedTrans, err := omniTransaction.InsertSignatureIntoEmptyTransaction(emptyTrans, transHash, txUnlocks)
@@ -1143,6 +1428,66 @@ func (decoder *TransactionDecoder) CreateBTCSummaryRawTransaction(wrapper openwa
 	return rawTxArray, nil
 }
 
+var OpCheckMultiSig =byte(0xAE)
+//生成 redeemScript
+func (decoder *TransactionDecoder) MakeRedeemScript(owAccountKeys []string,needSignCnt ,addressIndex uint64 ) (string,map[string]int,error){
+
+	if len(owAccountKeys)==0 || needSignCnt==0 || needSignCnt> uint64(len(owAccountKeys)) || len(owAccountKeys)>15{
+		return  "",nil,errors.New("GetRedeemScript error ,public keys and needSign param error ")
+	}
+	var pubAddrKeys []*owkeychain.ExtendedKey
+	pubkeySortMap  := make(map[string]int)
+
+	for index,key := range owAccountKeys{
+		accountPubKey, err := owkeychain.OWDecode(key)
+		if err != nil {
+			return "",nil,err
+
+		}
+		start, err := accountPubKey.GenPublicChild(uint32(0))
+		newAddrKey, err := start.GenPublicChild(uint32(addressIndex))
+		pubAddrKeys = append(pubAddrKeys,newAddrKey)
+		pubkeySortMap[hex.EncodeToString(newAddrKey.GetPublicKeyBytes())]=index
+
+	}
+
+	redeemScriptByte := make([]byte, 0)
+
+	//最少参与签名的key数量
+	signLenOp := 0x50+needSignCnt
+	redeemScriptByte = append([]byte{byte(signLenOp)}, redeemScriptByte...)
+	for _, pubKey := range pubAddrKeys {
+		redeemScriptByte = append(redeemScriptByte, byte(len(pubKey.GetPublicKeyBytes())))
+		redeemScriptByte = append(redeemScriptByte, pubKey.GetPublicKeyBytes()...)
+	}
+	totalLenOp := 0x50+len(pubAddrKeys)
+	redeemScriptByte = append(redeemScriptByte,byte(totalLenOp))
+	redeemScriptByte = append(redeemScriptByte,OpCheckMultiSig)
+
+	redeemScript := hex.EncodeToString(redeemScriptByte)
+	return redeemScript,pubkeySortMap,nil
+
+}
+
+//获取账户地址对应的公钥
+func (decoder *TransactionDecoder) GetAddressPublicKey(owAccountKey string,addressIndex uint64 )(*owkeychain.ExtendedKey,error){
+
+	if owAccountKey == ""{
+		return  nil,errors.New("GetAddressPublicKey error ,public keys and needSign param error ")
+	}
+
+	accountPubKey, err := owkeychain.OWDecode(owAccountKey)
+	if err != nil {
+		return nil,err
+
+	}
+	start, err := accountPubKey.GenPublicChild(uint32(0))
+	return  start.GenPublicChild(uint32(addressIndex))
+
+}
+
+
+
 //createBTCRawTransaction 创建BTC原始交易单
 func (decoder *TransactionDecoder) createBTCRawTransaction(
 	wrapper openwallet.WalletDAI,
@@ -1193,11 +1538,34 @@ func (decoder *TransactionDecoder) createBTCRawTransaction(
 	}
 
 	//装配输入
+	//多重签名地址 装配redeemScript
 	for _, utxo := range usedUTXO {
 		in := btcTransaction.Vin{utxo.TxID, uint32(utxo.Vout)}
 		vins = append(vins, in)
+		var txUnlock btcTransaction.TxUnlock
+		//amount, _ := strconv.ParseUint(utxo.Amount, 10, 64)
+		amountBig :=common.StringNumToBigIntWithExp(utxo.Amount,8)
 
-		txUnlock := btcTransaction.TxUnlock{LockScript: utxo.ScriptPubKey, SigType: btcTransaction.SigHashAll}
+		//多签名
+		if len(rawTx.Account.OwnerKeys)>1{
+			addresses, _:= wrapper.GetAddressList(0, -1, "AccountID", accountID, "Address", utxo.Address)
+			if len(addresses) !=1 {
+				return errors.New("build TxUnlock error:address not found ")
+			}
+			addressIndex := addresses[0].Index
+			publicKeys := rawTx.Account.OwnerKeys[1:]
+			redeemScript,_,err:= decoder.MakeRedeemScript(publicKeys,rawTx.Account.Required,addressIndex)
+			if err != nil{
+				return err
+			}
+			txUnlock = btcTransaction.TxUnlock{LockScript: utxo.ScriptPubKey,
+				SigType: btcTransaction.SigHashAll,
+				RedeemScript:redeemScript,Amount:amountBig.Uint64()}
+
+		}else{
+			txUnlock = btcTransaction.TxUnlock{LockScript: utxo.ScriptPubKey,
+				SigType: btcTransaction.SigHashAll,Amount:amountBig.Uint64()}
+		}
 		txUnlocks = append(txUnlocks, txUnlock)
 
 		txFrom = append(txFrom, fmt.Sprintf("%s:%s", utxo.Address, utxo.Amount))
@@ -1256,7 +1624,18 @@ func (decoder *TransactionDecoder) createBTCRawTransaction(
 		//判断是否是多重签名
 		if txHash.IsMultisig() {
 			//获取地址
-			//unlockAddr = txHash.GetMultiTxPubkeys() //返回hex数组
+			var publicKeyByteArray [][]byte
+			publicKeyByteArray = append(publicKeyByteArray,nil)
+			for _,k := range txHash.GetMultiTxPubkeys(){
+				pubKeyByte ,_:=  hex.DecodeString(k)
+				publicKeyByteArray = append(publicKeyByteArray,pubKeyByte)
+			}
+			addr,err :=decoder.wm.GetAddressDecode().RedeemScriptToAddress(publicKeyByteArray,uint64(txHash.NRequired),decoder.wm.Config.IsTestNet)
+			if err != nil{
+				return err
+			}
+			unlockAddr = addr
+
 		} else {
 			//获取地址
 			unlockAddr = txHash.GetNormalTxAddress() //返回hex串
@@ -1364,10 +1743,26 @@ func (decoder *TransactionDecoder) createOmniRawTransaction(
 	for _, utxo := range usedUTXO {
 		in := omniTransaction.Vin{utxo.TxID, uint32(utxo.Vout)}
 		vins = append(vins, in)
-
-		txUnlock := omniTransaction.TxUnlock{LockScript: utxo.ScriptPubKey, SigType: btcTransaction.SigHashAll}
+		var txUnlock omniTransaction.TxUnlock
+		amountBig :=common.StringNumToBigIntWithExp(utxo.Amount,8)
+		if len(rawTx.Account.OwnerKeys)>1{
+			addresses, _:= wrapper.GetAddressList(0, -1, "AccountID", accountID, "Address", utxo.Address)
+			if len(addresses) !=1 {
+				return errors.New("build omni TxUnlock error:address not found ")
+			}
+			addressIndex := addresses[0].Index
+			publicKeys := rawTx.Account.OwnerKeys[1:]
+			redeemScript,_,err:= decoder.MakeRedeemScript(publicKeys,rawTx.Account.Required,addressIndex)
+			if err != nil{
+				return err
+			}
+			txUnlock = omniTransaction.TxUnlock{LockScript: utxo.ScriptPubKey,
+				SigType: btcTransaction.SigHashAll,
+				RedeemScript:redeemScript,Amount:amountBig.Uint64()}
+		}else {
+			txUnlock = omniTransaction.TxUnlock{LockScript: utxo.ScriptPubKey, SigType: btcTransaction.SigHashAll}
+		}
 		txUnlocks = append(txUnlocks, txUnlock)
-
 		//txFrom = append(txFrom, fmt.Sprintf("%s:%s", utxo.Address, utxo.Amount))
 	}
 
@@ -1454,6 +1849,18 @@ func (decoder *TransactionDecoder) createOmniRawTransaction(
 		if txHash.IsMultisig() {
 			//获取地址
 			//unlockAddr = txHash.GetMultiTxPubkeys() //返回hex数组
+			//获取地址
+			var publicKeyByteArray [][]byte
+			publicKeyByteArray = append(publicKeyByteArray,nil)
+			for _,k := range txHash.GetMultiTxPubkeys(){
+				pubKeyByte ,_:=  hex.DecodeString(k)
+				publicKeyByteArray = append(publicKeyByteArray,pubKeyByte)
+			}
+			addr,err :=decoder.wm.GetAddressDecode().RedeemScriptToAddress(publicKeyByteArray,uint64(txHash.NRequired),decoder.wm.Config.IsTestNet)
+			if err != nil{
+				return err
+			}
+			unlockAddr = addr
 		} else {
 			//获取地址
 			unlockAddr = txHash.GetNormalTxAddress() //返回hex串

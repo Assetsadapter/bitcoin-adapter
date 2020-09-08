@@ -16,7 +16,9 @@
 package bitcoin
 
 import (
+	"encoding/hex"
 	"fmt"
+	"github.com/blocktree/openwallet/log"
 	"github.com/blocktree/openwallet/openwallet"
 
 	"github.com/blocktree/go-owcdrivers/addressEncoder"
@@ -101,7 +103,7 @@ func (decoder *addressDecoder) PublicKeyToAddress(pub []byte, isTestnet bool) (s
 	return address, nil
 
 }
-
+//多签操作码
 //RedeemScriptToAddress 多重签名赎回脚本转地址
 func (decoder *addressDecoder) RedeemScriptToAddress(pubs [][]byte, required uint64, isTestnet bool) (string, error) {
 
@@ -110,16 +112,29 @@ func (decoder *addressDecoder) RedeemScriptToAddress(pubs [][]byte, required uin
 		cfg = addressEncoder.BTC_testnetAddressP2SH
 	}
 
+	pubs = pubs[1:]
 	redeemScript := make([]byte, 0)
-
+	redeemScript = append([]byte{byte(0x50+required)},redeemScript...)
 	for _, pub := range pubs {
+		log.Info("pubkey:",hex.EncodeToString(pub))
+		redeemScript = append(redeemScript, byte(len(pub)))
 		redeemScript = append(redeemScript, pub...)
 	}
-
+	redeemScript = append(redeemScript,byte(len(pubs)+0x50))
+	redeemScript = append(redeemScript,OpCheckMultiSig)
+	log.Info("redeemScriptHash:",hex.EncodeToString(redeemScript))
 	pkHash := owcrypt.Hash(redeemScript, 0, owcrypt.HASH_ALG_HASH160)
+	log.Info("pkHash:",hex.EncodeToString(pkHash))
 
 	address := addressEncoder.AddressEncode(pkHash, cfg)
-
+	if decoder.wm.Config.RPCServerType == RPCServerCore {
+		//如果使用core钱包作为全节点，需要导入地址到core，这样才能查询地址余额和utxo
+		err := decoder.wm.ImportAddress(address, "")
+		if err != nil {
+			return "", err
+		}
+	}
+	log.Info("address:",address)
 	return address, nil
 
 }
